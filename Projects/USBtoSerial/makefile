@@ -28,6 +28,9 @@ AVRDUDE_PORT       :=  /dev/ttyARDUINO
 # Default target
 all:
 
+program: $(TARGET).hex $(MAKEFILE_LIST)
+	sh ./program.sh
+
 # Include LUFA build script makefiles
 include $(LUFA_PATH)/Build/lufa_core.mk
 include $(LUFA_PATH)/Build/lufa_sources.mk
