@@ -94,6 +94,75 @@ static void enter_bootloader (void)
 	while (1) {}
 }
 
+#define MSR_COUNTER_MAX 8000
+#define MSR_RUNNING_bm 0x1
+#define MSR_ADC_STARTED_bm 0x2
+
+static uint8_t msr_state = 0;
+static uint16_t msr_counter = 0;
+
+static inline uint8_t msr_is_started (void)
+{
+	return (msr_state & MSR_RUNNING_bm);
+}
+
+static void msr_start (void)
+{
+	if (msr_state & MSR_RUNNING_bm)
+		return;
+
+	ADMUX = (1 << 6) | /* REF0 => AVcc */
+		(1 << 5) | /* ADLAR=1 => fill ADCH */
+		0b110; /* ADC6 */
+
+	ADCSRA = (1 << ADEN) | /* enable ADC */
+		 (1 << ADIF) | /* reset IRQ */
+		 0b111; /* divide clock by 128 */
+	ADCSRB = 0x0;
+
+	msr_state = MSR_RUNNING_bm;
+}
+
+static void msr_stop (void)
+{
+	ADCSRA = 0x0;
+	ADCSRB = 0x0;
+	ADMUX = 0x0;
+
+	msr_state = 0;
+}
+
+static void msr_update (void)
+{
+	float ftmp;
+	uint8_t adc_result;
+
+	if (!(msr_state & MSR_RUNNING_bm))
+		return;
+
+	if (msr_counter == 0) {
+		if (msr_state & MSR_ADC_STARTED_bm) {
+			if ((ADCSRA & (1 << ADIF)) != 0) {
+				adc_result = ADCH;
+				ftmp = adc_result;
+				ftmp = ftmp * (5.0f/256.0f);
+				fprintf(&usb_stream,
+					"\r                       "
+					"\r[measure] A1 = %4.2fV   ",
+					ftmp);
+				msr_counter = MSR_COUNTER_MAX;
+				msr_state &= ~(MSR_ADC_STARTED_bm);
+			}
+		} else {
+			ADCSRA |= (1 << ADSC) |
+				  (1 << ADIF);
+			msr_state |= MSR_ADC_STARTED_bm;
+		}
+	} else {
+		--msr_counter;
+	}
+}
+
 static void ctrl_monitor (USB_ClassInfo_CDC_Device_t *vdev)
 {
 	static uint8_t slave_reset = 0;
@@ -101,7 +170,12 @@ static void ctrl_monitor (USB_ClassInfo_CDC_Device_t *vdev)
 
 	if (monitor_refresh) {
 		monitor_refresh = 0;
-		fprintf(&usb_stream, "\r\nMonitor\r\n=======\r\na) Reset slave %hhd\r\nb) Bootloader\r\n", slave_reset);
+		fprintf(&usb_stream, "\r\nMonitor\r\n=======\r\n"
+			"a) Reset slave: %s (A0)\r\n"
+			"b) Enter bootloader\r\n"
+			"m) Measure mode: %s (A1)\r\n",
+			slave_reset ? "enabled" : "disabled",
+			msr_is_started() ? "enabled" : "disabled");
 	}
 
 	rx_byte = CDC_Device_ReceiveByte(vdev);
@@ -125,6 +199,17 @@ static void ctrl_monitor (USB_ClassInfo_CDC_Device_t *vdev)
 			USB_Disable();
 			_delay_ms(2000);
 			enter_bootloader();
+			break;
+
+		case 'M':
+		case 'm':
+			if (msr_is_started()) {
+				msr_stop();
+			} else {
+				msr_start();
+			}
+			fprintf(&usb_stream,
+				"\r                       \r\n");
 			break;
 		default:
 			break;
@@ -153,6 +238,7 @@ int main(void)
 		if (VirtualSerial_CDC_Interface.State.LineEncoding.BaudRateBPS == 1200) {
 			/* control interface */
 			ctrl_monitor(&VirtualSerial_CDC_Interface);
+			msr_update();
 		} else {
 			/* Only try to read in bytes from the CDC interface if the transmit buffer is not full */
 			if (!(RingBuffer_IsFull(&USBtoUSART_Buffer))) {
@@ -211,6 +297,7 @@ void SetupHardware(void)
 #endif
 
 	DDRF |= (1 << 7);
+	DDRF &= ~(1 << 6);
 	PORTF &= ~(1 << 7);
 
 	/* Hardware Initialization */
