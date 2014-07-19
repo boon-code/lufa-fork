@@ -54,3 +54,31 @@ individual demos, projects or bootloaders) is also available as a separate
 package from the project webpage for convenience if Doxygen cannot be
 installed.
 
+
+My Enhancements
+===============
+
+I added a 'monitor mode' to the USBtoSerial Project. As long as you
+don't connect to the device with 1200 baud, the device will behave
+like a simple USB to RS232 converter. If you change the baud-rate to
+1200 baud, a textual menu (monitor) will be presented which offers
+some nice features. Currently, following modes are available:
+
+-  Slave reset: Simple digital IO pin (A0 on the Arduino Micro) will be
+   toggled by pressing a. This is useful if you want to program another
+   device which needs a reset.
+-  Enter bootloader: Can be used to reprogram the device itself (using
+   standard Arduino bootloader).
+-  Measure mode: Measures pin level (on A1 on the Arduino Micro board)
+   and continuously outputs measured voltage. Note that the software
+   timeout is really bad, but I didn't want to use an hardware timer
+   for that (therefore timing is extremely imprecise).
+
+I use following udev rules to create symlinks for device nodes used in
+program.sh:
+
+   # My Adruino Micro
+   SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="0037", SYMLINK+="ttyARDUINO"
+
+   # Enhanced USBtoSerial device
+   SUBSYSTEM=="tty", ATTRS{idVendor}=="03eb", ATTRS{idProduct}=="204b", ATTRS{product}=="Enhanced LUFA USB-RS232 Adapter", SYMLINK+="ttyEUSB"
