@@ -21,7 +21,7 @@ TARGET       = USBtoSerial
 SRC          = $(TARGET).c Descriptors.c $(LUFA_SRC_USB) $(LUFA_SRC_USBCLASS)
 LUFA_PATH    = ../../LUFA
 CC_FLAGS     = -DUSE_LUFA_CONFIG_HEADER -IConfig/
-LD_FLAGS     =
+LD_FLAGS     = -Wl,-u,vfprintf -lprintf_flt -lm
 AVRDUDE_PROGRAMMER :=  avr109
 AVRDUDE_PORT       :=  /dev/ttyARDUINO
 
