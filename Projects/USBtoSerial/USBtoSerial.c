@@ -35,6 +35,7 @@
  */
 
 #include "USBtoSerial.h"
+#include <util/delay.h>
 
 /** Circular buffer to hold data from the host before it is sent to the device via the serial port. */
 static RingBuffer_t USBtoUSART_Buffer;
@@ -78,6 +79,58 @@ USB_ClassInfo_CDC_Device_t VirtualSerial_CDC_Interface =
 			},
 	};
 
+static uint8_t monitor_refresh = 1;
+static FILE usb_stream;
+
+volatile uint16_t *bootKeyPtr = (volatile uint16_t *)0x0800;
+
+static void enter_bootloader (void)
+{
+	cli();
+	MCUCR |= (1 << IVCE);
+	MCUCR = (1 << IVSEL);
+	bootKeyPtr[0] = 0x7777;
+	wdt_enable(WDTO_250MS);
+	while (1) {}
+}
+
+static void ctrl_monitor (USB_ClassInfo_CDC_Device_t *vdev)
+{
+	static uint8_t slave_reset = 0;
+	int16_t rx_byte;
+
+	if (monitor_refresh) {
+		monitor_refresh = 0;
+		fprintf(&usb_stream, "\r\nMonitor\r\n=======\r\na) Reset slave %hhd\r\nb) Bootloader\r\n", slave_reset);
+	}
+
+	rx_byte = CDC_Device_ReceiveByte(vdev);
+	if (rx_byte >= 0) {
+		monitor_refresh = 1;
+		switch (rx_byte) {
+		case 'A':
+		case 'a':
+			if (slave_reset == 0) {
+				slave_reset = 1;
+				PORTF |= (1 << 7);
+			} else {
+				slave_reset = 0;
+				PORTF &= ~(1 << 7);
+			}
+			break;
+
+		case 'B':
+		case 'b':
+			cli();
+			USB_Disable();
+			_delay_ms(2000);
+			enter_bootloader();
+			break;
+		default:
+			break;
+		}
+	}
+}
 
 /** Main program entry point. This routine contains the overall program flow, including initial
  *  setup of all components and the main program loop.
@@ -89,53 +142,56 @@ int main(void)
 	RingBuffer_InitBuffer(&USBtoUSART_Buffer, USBtoUSART_Buffer_Data, sizeof(USBtoUSART_Buffer_Data));
 	RingBuffer_InitBuffer(&USARTtoUSB_Buffer, USARTtoUSB_Buffer_Data, sizeof(USARTtoUSB_Buffer_Data));
 
+	VirtualSerial_CDC_Interface.State.LineEncoding.BaudRateBPS = 9600; /* Reset variable to some default value */
+
+	CDC_Device_CreateStream(&VirtualSerial_CDC_Interface, &usb_stream);
+
 	LEDs_SetAllLEDs(LEDMASK_USB_NOTREADY);
 	GlobalInterruptEnable();
 
-	for (;;)
-	{
-		/* Only try to read in bytes from the CDC interface if the transmit buffer is not full */
-		if (!(RingBuffer_IsFull(&USBtoUSART_Buffer)))
-		{
-			int16_t ReceivedByte = CDC_Device_ReceiveByte(&VirtualSerial_CDC_Interface);
+	for (;;) {
+		if (VirtualSerial_CDC_Interface.State.LineEncoding.BaudRateBPS == 1200) {
+			/* control interface */
+			ctrl_monitor(&VirtualSerial_CDC_Interface);
+		} else {
+			/* Only try to read in bytes from the CDC interface if the transmit buffer is not full */
+			if (!(RingBuffer_IsFull(&USBtoUSART_Buffer))) {
+				int16_t ReceivedByte = CDC_Device_ReceiveByte(&VirtualSerial_CDC_Interface);
 
-			/* Store received byte into the USART transmit buffer */
-			if (!(ReceivedByte < 0))
-			  RingBuffer_Insert(&USBtoUSART_Buffer, ReceivedByte);
-		}
+				/* Store received byte into the USART transmit buffer */
+				if (!(ReceivedByte < 0))
+					RingBuffer_Insert(&USBtoUSART_Buffer, ReceivedByte);
+			}
 
-		uint16_t BufferCount = RingBuffer_GetCount(&USARTtoUSB_Buffer);
-		if (BufferCount)
-		{
-			Endpoint_SelectEndpoint(VirtualSerial_CDC_Interface.Config.DataINEndpoint.Address);
+			uint16_t BufferCount = RingBuffer_GetCount(&USARTtoUSB_Buffer);
+			if (BufferCount) {
+				Endpoint_SelectEndpoint(VirtualSerial_CDC_Interface.Config.DataINEndpoint.Address);
 
-			/* Check if a packet is already enqueued to the host - if so, we shouldn't try to send more data
-			 * until it completes as there is a chance nothing is listening and a lengthy timeout could occur */
-			if (Endpoint_IsINReady())
-			{
-				/* Never send more than one bank size less one byte to the host at a time, so that we don't block
-				 * while a Zero Length Packet (ZLP) to terminate the transfer is sent if the host isn't listening */
-				uint8_t BytesToSend = MIN(BufferCount, (CDC_TXRX_EPSIZE - 1));
+				/* Check if a packet is already enqueued to the host - if so, we shouldn't try to send more data
+				 * until it completes as there is a chance nothing is listening and a lengthy timeout could occur */
+				if (Endpoint_IsINReady()) {
+					/* Never send more than one bank size less one byte to the host at a time, so that we don't block
+					 * while a Zero Length Packet (ZLP) to terminate the transfer is sent if the host isn't listening */
+					uint8_t BytesToSend = MIN(BufferCount, (CDC_TXRX_EPSIZE - 1));
 
-				/* Read bytes from the USART receive buffer into the USB IN endpoint */
-				while (BytesToSend--)
-				{
-					/* Try to send the next byte of data to the host, abort if there is an error without dequeuing */
-					if (CDC_Device_SendByte(&VirtualSerial_CDC_Interface,
-											RingBuffer_Peek(&USARTtoUSB_Buffer)) != ENDPOINT_READYWAIT_NoError)
-					{
-						break;
+					/* Read bytes from the USART receive buffer into the USB IN endpoint */
+					while (BytesToSend--) {
+						/* Try to send the next byte of data to the host, abort if there is an error without dequeuing */
+						if (CDC_Device_SendByte(&VirtualSerial_CDC_Interface,
+									RingBuffer_Peek(&USARTtoUSB_Buffer)) != ENDPOINT_READYWAIT_NoError) {
+							break;
+						}
+
+						/* Dequeue the already sent byte from the buffer now we have confirmed that no transmission error occurred */
+						RingBuffer_Remove(&USARTtoUSB_Buffer);
 					}
-
-					/* Dequeue the already sent byte from the buffer now we have confirmed that no transmission error occurred */
-					RingBuffer_Remove(&USARTtoUSB_Buffer);
 				}
 			}
-		}
 
-		/* Load the next byte from the USART transmit buffer into the USART */
-		if (!(RingBuffer_IsEmpty(&USBtoUSART_Buffer)))
-		  Serial_SendByte(RingBuffer_Remove(&USBtoUSART_Buffer));
+			/* Load the next byte from the USART transmit buffer into the USART */
+			if (!(RingBuffer_IsEmpty(&USBtoUSART_Buffer)))
+				Serial_SendByte(RingBuffer_Remove(&USBtoUSART_Buffer));
+		}
 
 		CDC_Device_USBTask(&VirtualSerial_CDC_Interface);
 		USB_USBTask();
@@ -153,6 +209,9 @@ void SetupHardware(void)
 	/* Disable clock division */
 	clock_prescale_set(clock_div_1);
 #endif
+
+	DDRF |= (1 << 7);
+	PORTF &= ~(1 << 7);
 
 	/* Hardware Initialization */
 	LEDs_Init();
@@ -187,6 +246,12 @@ void EVENT_USB_Device_ControlRequest(void)
 	CDC_Device_ProcessControlRequest(&VirtualSerial_CDC_Interface);
 }
 
+//void EVENT_CDC_Device_ControLineStateChanged(USB_ClassInfo_CDC_Device_t* const CDCInterfaceInfo)
+//{
+//	fprintf(&usb_stream, "H2D: %lx\r\n", (long)CDCInterfaceInfo->State.ControlLineStates.HostToDevice);
+//	fprintf(&usb_stream, "D2H: %lx\r\n", (long)CDCInterfaceInfo->State.ControlLineStates.DeviceToHost);
+//}
+
 /** ISR to manage the reception of data from the serial port, placing received bytes into a circular buffer
  *  for later transmission to the host.
  */
@@ -195,7 +260,7 @@ ISR(USART1_RX_vect, ISR_BLOCK)
 	uint8_t ReceivedByte = UDR1;
 
 	if (USB_DeviceState == DEVICE_STATE_Configured)
-	  RingBuffer_Insert(&USARTtoUSB_Buffer, ReceivedByte);
+		RingBuffer_Insert(&USARTtoUSB_Buffer, ReceivedByte);
 }
 
 /** Event handler for the CDC Class driver Line Encoding Changed event.
@@ -206,30 +271,31 @@ void EVENT_CDC_Device_LineEncodingChanged(USB_ClassInfo_CDC_Device_t* const CDCI
 {
 	uint8_t ConfigMask = 0;
 
-	switch (CDCInterfaceInfo->State.LineEncoding.ParityType)
-	{
-		case CDC_PARITY_Odd:
-			ConfigMask = ((1 << UPM11) | (1 << UPM10));
-			break;
-		case CDC_PARITY_Even:
-			ConfigMask = (1 << UPM11);
-			break;
+	switch (CDCInterfaceInfo->State.LineEncoding.ParityType) {
+	case CDC_PARITY_Odd:
+		ConfigMask = ((1 << UPM11) | (1 << UPM10));
+		break;
+
+	case CDC_PARITY_Even:
+		ConfigMask = (1 << UPM11);
+		break;
 	}
 
 	if (CDCInterfaceInfo->State.LineEncoding.CharFormat == CDC_LINEENCODING_TwoStopBits)
-	  ConfigMask |= (1 << USBS1);
+		ConfigMask |= (1 << USBS1);
 
-	switch (CDCInterfaceInfo->State.LineEncoding.DataBits)
-	{
-		case 6:
-			ConfigMask |= (1 << UCSZ10);
-			break;
-		case 7:
-			ConfigMask |= (1 << UCSZ11);
-			break;
-		case 8:
-			ConfigMask |= ((1 << UCSZ11) | (1 << UCSZ10));
-			break;
+	switch (CDCInterfaceInfo->State.LineEncoding.DataBits) {
+	case 6:
+		ConfigMask |= (1 << UCSZ10);
+		break;
+
+	case 7:
+		ConfigMask |= (1 << UCSZ11);
+		break;
+
+	case 8:
+		ConfigMask |= ((1 << UCSZ11) | (1 << UCSZ10));
+		break;
 	}
 
 	/* Must turn off USART before reconfiguring it, otherwise incorrect operation may occur */
@@ -244,5 +310,8 @@ void EVENT_CDC_Device_LineEncodingChanged(USB_ClassInfo_CDC_Device_t* const CDCI
 	UCSR1C = ConfigMask;
 	UCSR1A = (1 << U2X1);
 	UCSR1B = ((1 << RXCIE1) | (1 << TXEN1) | (1 << RXEN1));
+
+	if (CDCInterfaceInfo->State.LineEncoding.BaudRateBPS == 1200)
+		monitor_refresh = 1;
 }
 
