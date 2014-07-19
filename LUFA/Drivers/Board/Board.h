@@ -145,6 +145,8 @@
 			#include "AVR8/OLIMEXISPMK2/Board.h"
 		#elif (BOARD == BOARD_LEONARDO)
 			#include "AVR8/LEONARDO/Board.h"
+		#elif (BOARD == BOARD_ARDUINO_MICRO)
+			#include "AVR8/ARDUINO_MICRO/Board.h"
 		#elif (BOARD == BOARD_UC3A3_XPLAINED)
 			#include "UC3/UC3A3_XPLAINED/Board.h"
 		#elif (BOARD == BOARD_STANGE_ISP)
