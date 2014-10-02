@@ -36,6 +36,7 @@
 
 #include "USBtoSerial.h"
 #include <util/delay.h>
+#include <avr/sleep.h>
 
 /** Circular buffer to hold data from the host before it is sent to the device via the serial port. */
 static RingBuffer_t USBtoUSART_Buffer;
@@ -92,6 +93,97 @@ static void enter_bootloader (void)
 	bootKeyPtr[0] = 0x7777;
 	wdt_enable(WDTO_250MS);
 	while (1) {}
+}
+
+#define PSAVE_MCU_LOCKED() do { \
+        sleep_enable(); \
+        set_sleep_mode(SLEEP_MODE_PWR_SAVE); \
+        sei(); \
+        sleep_cpu(); \
+        sleep_disable(); \
+} while (0)
+
+#define PDOWN_MCU_LOCKED() do { \
+        sleep_enable(); \
+        set_sleep_mode(SLEEP_MODE_PWR_DOWN); \
+        sei();			     \
+        sleep_cpu(); \
+        sleep_disable(); \
+} while (0)
+
+static volatile wdt_counter = 0;
+
+ISR(WDT_vect)
+{
+	++wdt_counter;
+
+	switch(wdt_counter) {
+	case 10:
+		LEDs_SetAllLEDs(LEDS_LED1);
+		break;
+	case 21:
+	case 31:
+	case 11:
+		LEDs_SetAllLEDs(0);
+		break;
+	case 20:
+		LEDs_SetAllLEDs(LEDS_LED2);
+		break;
+	case 30:
+		LEDs_SetAllLEDs(LEDS_LED3);
+		break;
+	default:
+		break;
+	}
+}
+
+#define WDT_CONFIG_MASK (_BV(WDIE) | _BV(WDE))
+
+#define wdt_config_locked(config,value) \
+__asm__ __volatile__ ( \
+	"in __tmp_reg__,__SREG__" "\n\t" \
+	"cli" "\n\t" \
+	"wdr" "\n\t" \
+	"sts %0,%1" "\n\t" \
+	"out __SREG__,__tmp_reg__" "\n\t" \
+	"sts %0,%2" "\n\t" \
+ \
+	: /* no outputs */ \
+	: "M" (_SFR_MEM_ADDR(_WD_CONTROL_REG)), \
+	"r" (_BV(_WD_CHANGE_BIT) | _BV(WDE)), \
+	"r" ((uint8_t) ((value & 0x08 ? _WD_PS3_MASK : 0x00) | \
+             (config & WDT_CONFIG_MASK) | (value & 0x07)) ) \
+	: "r0" \
+)
+
+static void blink (void)
+{
+	uint8_t i;
+
+	for (i = 0; i < 4; ++i) {
+		LEDs_SetAllLEDs(LEDS_LED1 | LEDS_LED2 | LEDS_LED3);
+		_delay_ms(250);
+		LEDs_SetAllLEDs(0);
+		_delay_ms(250);
+	}
+}
+
+static void enter_deep_sleep (void)
+{
+	uint8_t i;
+
+	cli();
+	LEDs_SetAllLEDs(0);
+	USB_Detach();
+	blink();
+	wdt_counter = 0;
+	while (wdt_counter < 40) {
+		wdt_config_locked(_BV(WDIE),WDTO_8S);
+		PDOWN_MCU_LOCKED();
+	}
+	wdt_disable();
+	blink();
+	USB_Attach();
 }
 
 #define MSR_COUNTER_MAX 8000
@@ -210,6 +302,11 @@ static void ctrl_monitor (USB_ClassInfo_CDC_Device_t *vdev)
 			}
 			fprintf(&usb_stream,
 				"\r                       \r\n");
+			break;
+
+		case 'S':
+		case 's':
+			enter_deep_sleep();
 			break;
 		default:
 			break;
