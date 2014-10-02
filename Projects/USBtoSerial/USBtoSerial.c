@@ -156,11 +156,11 @@ __asm__ __volatile__ ( \
 	: "r0" \
 )
 
-static void blink (void)
+static void blink (uint8_t max)
 {
 	uint8_t i;
 
-	for (i = 0; i < 4; ++i) {
+	for (i = 0; i < max; ++i) {
 		LEDs_SetAllLEDs(LEDS_LED1 | LEDS_LED2 | LEDS_LED3);
 		_delay_ms(250);
 		LEDs_SetAllLEDs(0);
@@ -175,14 +175,14 @@ static void enter_deep_sleep (void)
 	cli();
 	LEDs_SetAllLEDs(0);
 	USB_Detach();
-	blink();
+	blink(4);
 	wdt_counter = 0;
-	while (wdt_counter < 40) {
+	while (wdt_counter < 1) {
 		wdt_config_locked(_BV(WDIE),WDTO_8S);
 		PDOWN_MCU_LOCKED();
 	}
 	wdt_disable();
-	blink();
+	blink(4);
 	USB_Attach();
 }
 
@@ -258,6 +258,7 @@ static void msr_update (void)
 static void ctrl_monitor (USB_ClassInfo_CDC_Device_t *vdev)
 {
 	static uint8_t slave_reset = 0;
+	static uint8_t rpi_powered = 0;
 	int16_t rx_byte;
 
 	if (monitor_refresh) {
@@ -265,9 +266,12 @@ static void ctrl_monitor (USB_ClassInfo_CDC_Device_t *vdev)
 		fprintf(&usb_stream, "\r\nMonitor\r\n=======\r\n"
 			"a) Reset slave: %s (A0)\r\n"
 			"b) Enter bootloader\r\n"
-			"m) Measure mode: %s (A1)\r\n",
+			"m) Measure mode: %s (A1)\r\n"
+			"s) Sleep\r\n"
+			"r) Rpi powered %s (D4)\r\n",
 			slave_reset ? "enabled" : "disabled",
-			msr_is_started() ? "enabled" : "disabled");
+			msr_is_started() ? "enabled" : "disabled",
+			rpi_powered ? "enabled" : "disabled");
 	}
 
 	rx_byte = CDC_Device_ReceiveByte(vdev);
@@ -288,8 +292,10 @@ static void ctrl_monitor (USB_ClassInfo_CDC_Device_t *vdev)
 		case 'B':
 		case 'b':
 			cli();
+			blink(3);
 			USB_Disable();
 			_delay_ms(2000);
+			blink(2);
 			enter_bootloader();
 			break;
 
@@ -308,6 +314,18 @@ static void ctrl_monitor (USB_ClassInfo_CDC_Device_t *vdev)
 		case 's':
 			enter_deep_sleep();
 			break;
+
+		case 'R':
+		case 'r':
+			if (rpi_powered == 0) {
+				rpi_powered = 1;
+				PORTD |= (1 << 4);
+			} else {
+				rpi_powered = 0;
+				PORTD &= ~(1 << 4);
+			}
+			break;
+
 		default:
 			break;
 		}
@@ -396,6 +414,9 @@ void SetupHardware(void)
 	DDRF |= (1 << 7);
 	DDRF &= ~(1 << 6);
 	PORTF &= ~(1 << 7);
+
+	PORTD &= ~(1 << 4);
+	DDRD |= (1 << 4);
 
 	/* Hardware Initialization */
 	LEDs_Init();
