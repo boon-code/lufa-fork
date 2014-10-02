@@ -4,7 +4,7 @@ NORMAL_DEV=/dev/ttyEUSB
 BOOT_DEV=/dev/ttyARDUINO
 DEFAULT_BAUDRATE=19200
 
-function wait_for_dev ()
+wait_for_dev()
 {
 	while [ ! -e "$1" ]; do
 		sleep 0.3
@@ -21,7 +21,15 @@ if [ $? -ne 0 ]; then
 	exit 1
 fi
 
-echo "b" > ${NORMAL_DEV}
+echo -n "[program]: Try to enter bootloader "
+
+while [ -e "${NORMAL_DEV}" ]; do
+	echo -n "."
+	echo "b" > ${NORMAL_DEV} 2>/dev/null
+	sleep 0.5
+done
+
+echo ""
 
 echo "[program]: Wait for bootloader ${BOOT_DEV} ..."
 sleep 1
