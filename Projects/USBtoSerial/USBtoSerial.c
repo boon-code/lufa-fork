@@ -168,22 +168,27 @@ static void blink (uint8_t max)
 	}
 }
 
-static void enter_deep_sleep (void)
+static void enter_deep_sleep (uint8_t count)
 {
-	uint8_t i;
-
 	cli();
 	LEDs_SetAllLEDs(0);
 	USB_Detach();
 	blink(4);
 	wdt_counter = 0;
-	while (wdt_counter < 1) {
+	while (wdt_counter < count) {
 		wdt_config_locked(_BV(WDIE),WDTO_8S);
 		PDOWN_MCU_LOCKED();
 	}
 	wdt_disable();
 	blink(4);
 	USB_Attach();
+}
+
+static void cyclic_sleep (void)
+{
+	PORTD &= ~(1 << 4);
+	enter_deep_sleep(50);
+	PORTD |= (1 << 4);
 }
 
 #define MSR_COUNTER_MAX 8000
@@ -258,7 +263,7 @@ static void msr_update (void)
 static void ctrl_monitor (USB_ClassInfo_CDC_Device_t *vdev)
 {
 	static uint8_t slave_reset = 0;
-	static uint8_t rpi_powered = 0;
+	static uint8_t rpi_powered = 1;
 	int16_t rx_byte;
 
 	if (monitor_refresh) {
@@ -312,7 +317,12 @@ static void ctrl_monitor (USB_ClassInfo_CDC_Device_t *vdev)
 
 		case 'S':
 		case 's':
-			enter_deep_sleep();
+			enter_deep_sleep(1);
+			break;
+
+		case 'C':
+		case 'c':
+			cyclic_sleep();
 			break;
 
 		case 'R':
@@ -415,7 +425,7 @@ void SetupHardware(void)
 	DDRF &= ~(1 << 6);
 	PORTF &= ~(1 << 7);
 
-	PORTD &= ~(1 << 4);
+	PORTD |= (1 << 4);
 	DDRD |= (1 << 4);
 
 	/* Hardware Initialization */
@@ -519,4 +529,3 @@ void EVENT_CDC_Device_LineEncodingChanged(USB_ClassInfo_CDC_Device_t* const CDCI
 	if (CDCInterfaceInfo->State.LineEncoding.BaudRateBPS == 1200)
 		monitor_refresh = 1;
 }
-
